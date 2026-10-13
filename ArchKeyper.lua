@@ -58,10 +58,10 @@ local SCOPE_BLUR = {
 	FadeOut = 0.2,
 }
 
--- shoot sfx: new shoot sound + rubber band twang (lower pitched)
+-- shoot sfx: new shoot sound + rubber band twang (very low pitched)
 local SHOOT_SFX = {
 	SoundId = 96253147006478, -- replaces the gun's shoot sounds
-	PlaybackSpeed = 0.4,  -- overall pitch/speed (lower = deeper)
+	PlaybackSpeed = 0.28, -- overall pitch/speed (lower = deeper)
 	PitchStart = 2,     -- twang starts HIGH...  (final pitch = PlaybackSpeed x this)
 	PitchLow = 0.5,     -- ...snaps down (elastic boing) to this (0.5 = min)
 	PitchEnd = 0.5,     -- then settles at the lowest pitch
@@ -72,17 +72,17 @@ local SHOOT_SFX = {
 	FlangerMix = 0.5,   -- extra "thwip" wobble
 }
 
--- angelic layer: quieter + deeper than before
+-- angelic layer: ONLY applied to the shoot sounds
 local ANGELIC = {
-	Pitch = 0.7,        -- non-shoot sounds (below 1 = deeper)
+	Pitch = 0.7,        -- unused (only shoot sounds are styled)
 	EQ = { LowGain = -2, MidGain = 0, HighGain = 2 },
 	ChorusMix = 0.25, ChorusDepth = 0.5,
 	ReverbDecay = 3.5, ReverbDry = -1, ReverbWet = -5,
-	-- much lighter version used on shoot sounds
+	-- DEEP angelic layer used on the shoot sounds
 	Shot = {
-		EQ = { LowGain = 3, MidGain = 0, HighGain = -1 },
-		ChorusMix = 0.1, ChorusDepth = 0.3,
-		ReverbDecay = 1.5, ReverbDry = 0, ReverbWet = -9,
+		EQ = { LowGain = 8, MidGain = -2, HighGain = 3 }, -- big sub boom + airy top
+		ChorusMix = 0.7, ChorusDepth = 0.9,               -- choir-like shimmer
+		ReverbDecay = 9, ReverbDry = -4, ReverbWet = 2,   -- huge cathedral tail
 	},
 }
 
@@ -99,6 +99,29 @@ local TEXTURE_URLS = {
 	wing  = "https://github.com/mrbeanissohot/ArchKeyperr/blob/main/v4_wing.png",
 }
 local MAIN_TEXTURE = "body"
+-- bump this number whenever you re-upload the textures to GitHub, so the
+-- new versions get downloaded instead of the old cached ones
+local TEXTURE_VERSION = 3
+
+-- generated gradient texture: built by the script itself, nothing to upload
+local GRADIENT = {
+	Enabled = true,  -- false = use the downloaded body texture instead
+	Version = 1,     -- bump after changing Size/Stops to regenerate the image
+	Size = 256,      -- pixels (256 is plenty for a soft gradient)
+	Stops = {        -- {position 0-1, R, G, B}: black -> deep green -> bright green
+		{ 0.00, 3, 5, 4 },
+		{ 0.38, 6, 40, 22 },
+		{ 0.72, 22, 150, 70 },
+		{ 1.00, 70, 255, 130 },
+	},
+}
+
+-- Texture objects (the tiling kind) repeat every this many studs
+local TEXTURE_TILE = {
+	Enabled = true,
+	Studs = 1,
+	ALL_TEXTURES = false, -- true = also retile every other Texture in the game
+}
 
 ---------------------------------------------------------------------
 -- DOWNLOAD HELPERS
@@ -130,7 +153,7 @@ end
 
 local TEXTURE_PATHS = {}
 for name, url in pairs(TEXTURE_URLS) do
-	TEXTURE_PATHS[name] = cachePathFor(url)
+	TEXTURE_PATHS[name] = CACHE_DIR .. "/t" .. TEXTURE_VERSION .. "_" .. cachePathFor(url):match("([^/]+)$")
 	download(url, TEXTURE_PATHS[name])
 end
 
@@ -249,7 +272,117 @@ end
 for _, r in ipairs(rules) do register(r) end
 print(("[ArchKeyper] rules registered: %d, skipped: %d"):format(registered, skipped))
 
-local TEXTURE = loadAsset(TEXTURE_PATHS[MAIN_TEXTURE])
+---------------------------------------------------------------------
+-- GRADIENT TEXTURE GENERATOR: draws a soft green/black PNG in code, saves it
+-- to the workspace and loads it like any other custom asset
+---------------------------------------------------------------------
+local CRC_TABLE = {}
+for i = 0, 255 do
+	local c = i
+	for _ = 1, 8 do
+		if bit32.band(c, 1) == 1 then
+			c = bit32.bxor(0xEDB88320, bit32.rshift(c, 1))
+		else
+			c = bit32.rshift(c, 1)
+		end
+	end
+	CRC_TABLE[i] = c
+end
+
+local function crc32(s)
+	local c = 0xFFFFFFFF
+	for i = 1, #s do
+		c = bit32.bxor(CRC_TABLE[bit32.band(bit32.bxor(c, s:byte(i)), 0xFF)], bit32.rshift(c, 8))
+	end
+	return bit32.bxor(c, 0xFFFFFFFF)
+end
+
+local function adler32(s)
+	local a, b = 1, 0
+	for i = 1, #s do
+		a = (a + s:byte(i)) % 65521
+		b = (b + a) % 65521
+	end
+	return b * 65536 + a
+end
+
+local function be32(n)
+	return string.char(bit32.band(bit32.rshift(n, 24), 255), bit32.band(bit32.rshift(n, 16), 255),
+		bit32.band(bit32.rshift(n, 8), 255), bit32.band(n, 255))
+end
+
+local function pngChunk(kind, data)
+	return be32(#data) .. kind .. data .. be32(crc32(kind .. data))
+end
+
+-- smooth, wrap-around field -> colour from the Stops ramp
+local function gradColor(u, v)
+	local tp = math.pi * 2
+	local g = 0.5 + 0.30 * math.cos(tp * (v - 0.12)) + 0.14 * math.cos(tp * (u + v) + 1.0) + 0.06 * math.cos(tp * (2 * u - v) + 2.2)
+	g = math.clamp(g, 0, 1)
+	g = g * g * (3 - 2 * g)
+	local S = GRADIENT.Stops
+	for i = 1, #S - 1 do
+		local a, b = S[i], S[i + 1]
+		if g <= b[1] or i == #S - 1 then
+			local t = math.clamp((g - a[1]) / (b[1] - a[1]), 0, 1)
+			t = t * t * (3 - 2 * t)
+			return a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t, a[4] + (b[4] - a[4]) * t
+		end
+	end
+end
+
+local function buildPng(size)
+	local parts = {}
+	for y = 0, size - 1 do
+		local row = table.create(size * 3 + 1)
+		row[1] = 0 -- PNG filter byte: none
+		for x = 0, size - 1 do
+			local r, g, b = gradColor((x + 0.5) / size, (y + 0.5) / size)
+			local k = x * 3 + 2
+			row[k] = math.floor(r + 0.5)
+			row[k + 1] = math.floor(g + 0.5)
+			row[k + 2] = math.floor(b + 0.5)
+		end
+		for i = 1, #row, 3000 do
+			parts[#parts + 1] = string.char(table.unpack(row, i, math.min(i + 2999, #row)))
+		end
+		if y % 32 == 0 then task.wait() end
+	end
+	local raw = table.concat(parts)
+
+	-- zlib stream made of uncompressed ("stored") blocks
+	local z = { "\120\1" }
+	local n, i = #raw, 1
+	while i <= n do
+		local len = math.min(65535, n - i + 1)
+		local final = (i + len > n) and 1 or 0
+		local nlen = 65535 - len
+		z[#z + 1] = string.char(final, bit32.band(len, 255), bit32.rshift(len, 8), bit32.band(nlen, 255), bit32.rshift(nlen, 8))
+		z[#z + 1] = raw:sub(i, i + len - 1)
+		i += len
+	end
+	z[#z + 1] = be32(adler32(raw))
+
+	local ihdr = be32(size) .. be32(size) .. "\8\2\0\0\0" -- 8-bit RGB
+	return "\137PNG\r\n\26\n" .. pngChunk("IHDR", ihdr) .. pngChunk("IDAT", table.concat(z)) .. pngChunk("IEND", "")
+end
+
+local function generateGradientTexture()
+	local path = CACHE_DIR .. "/gradient_v" .. GRADIENT.Version .. ".png"
+	if not isfile(path) then
+		if makefolder and isfolder and not isfolder(CACHE_DIR) then pcall(makefolder, CACHE_DIR) end
+		local ok, png = pcall(buildPng, GRADIENT.Size)
+		if not ok then
+			warn("[ArchKeyper] gradient generation failed: " .. tostring(png))
+			return nil
+		end
+		pcall(writefile, path, png)
+	end
+	return loadAsset(path)
+end
+
+local TEXTURE = (GRADIENT.Enabled and generateGradientTexture()) or loadAsset(TEXTURE_PATHS[MAIN_TEXTURE])
 if not TEXTURE then warn("[ArchKeyper] texture not loaded: " .. tostring(TEXTURE_PATHS[MAIN_TEXTURE])) end
 
 local PROPS = {
@@ -370,10 +503,11 @@ local function applyMesh(inst, asset)
 end
 
 ---------------------------------------------------------------------
--- SOUNDS: every gun sound gets an angelic chain (airy EQ + pitch lift +
--- chorus + cathedral reverb). Shoot sounds also get a rubber-band twang:
--- pitch starts high, snaps down with an elastic "boing" while a fast
--- tremolo vibrates and fades out, then settles back.
+-- SOUNDS: ONLY the shoot sounds are styled. They get the new shoot sound,
+-- a very low pitch, a deep angelic chain (boomy EQ + heavy chorus +
+-- cathedral reverb) and a rubber-band twang (pitch snaps down with an
+-- elastic "boing" while a fast tremolo vibrates and fades out).
+-- Every other gun sound is left untouched.
 ---------------------------------------------------------------------
 local AFFECT_ALL_SOUNDS = false
 local SOUND_IDS = {
@@ -416,66 +550,63 @@ local styled = setmetatable({}, { __mode = "k" })
 
 local function styleSound(snd)
 	if styled[snd] then return end
-	styled[snd] = true
 	local shot = isShot(snd)
+	if not shot then return end -- angelic ONLY on shoot sounds
+	styled[snd] = true
 	local origId = parseId(snd.SoundId)
 	local plain = origId and NO_ANGELIC_IDS[origId] or false
 	pcall(function()
-		if shot then
-			if SHOOT_SFX.SoundId and parseId(snd.SoundId) ~= SHOOT_SFX.SoundId then
-				snd.SoundId = "rbxassetid://" .. SHOOT_SFX.SoundId
-			end
-			snd.PlaybackSpeed = SHOOT_SFX.PlaybackSpeed
-			snd:GetPropertyChangedSignal("PlaybackSpeed"):Connect(function()
-				if snd.PlaybackSpeed ~= SHOOT_SFX.PlaybackSpeed then
-					snd.PlaybackSpeed = SHOOT_SFX.PlaybackSpeed
-				end
-			end)
+		if SHOOT_SFX.SoundId and parseId(snd.SoundId) ~= SHOOT_SFX.SoundId then
+			snd.SoundId = "rbxassetid://" .. SHOOT_SFX.SoundId
 		end
+		snd.PlaybackSpeed = SHOOT_SFX.PlaybackSpeed
+		snd:GetPropertyChangedSignal("PlaybackSpeed"):Connect(function()
+			if snd.PlaybackSpeed ~= SHOOT_SFX.PlaybackSpeed then
+				snd.PlaybackSpeed = SHOOT_SFX.PlaybackSpeed
+			end
+		end)
 		if not snd:FindFirstChild("ArchFX") then -- cloned sounds may already carry the effects
-			local A = shot and ANGELIC.Shot or ANGELIC
+			local A = ANGELIC.Shot
 			if not plain then
 				newFx("EqualizerSoundEffect", snd, { Priority = 1, LowGain = A.EQ.LowGain, MidGain = A.EQ.MidGain, HighGain = A.EQ.HighGain })
 			end
-			newFx("PitchShiftSoundEffect", snd, { Priority = 2, Octave = shot and SHOOT_SFX.PitchEnd or ANGELIC.Pitch })
+			newFx("PitchShiftSoundEffect", snd, { Priority = 2, Octave = SHOOT_SFX.PitchEnd })
 			if not plain then
 				newFx("ChorusSoundEffect", snd, { Priority = 3, Depth = A.ChorusDepth, Mix = A.ChorusMix, Rate = 0.9 })
 				newFx("ReverbSoundEffect", snd, {
 					Priority = 4, DecayTime = A.ReverbDecay, Density = 1, Diffusion = 1,
 					DryLevel = A.ReverbDry, WetLevel = A.ReverbWet,
 				})
+				-- extra deep layer: second pitch drop only the angelic shoot sounds get
+				newFx("PitchShiftSoundEffect", snd, { Priority = 4.5, Octave = 0.75 })
 			end
-			if shot then
-				newFx("FlangerSoundEffect", snd, { Priority = 5, Depth = 0.8, Mix = SHOOT_SFX.FlangerMix, Rate = 10 })
-				newFx("TremoloSoundEffect", snd, { Priority = 6, Frequency = SHOOT_SFX.TremoloFreq, Depth = 0, Duty = 0.5 })
+			newFx("FlangerSoundEffect", snd, { Priority = 5, Depth = 0.8, Mix = SHOOT_SFX.FlangerMix, Rate = 10 })
+			newFx("TremoloSoundEffect", snd, { Priority = 6, Frequency = SHOOT_SFX.TremoloFreq, Depth = 0, Duty = 0.5 })
+		end
+		local pitch = snd:FindFirstChildOfClass("PitchShiftSoundEffect")
+		local trem = snd:FindFirstChildOfClass("TremoloSoundEffect")
+		if not pitch then return end
+		local function twang()
+			snd.PlaybackSpeed = SHOOT_SFX.PlaybackSpeed
+			pitch.Octave = SHOOT_SFX.PitchStart
+			if trem then trem.Depth = SHOOT_SFX.TremoloDepth end
+			-- elastic snap-down = the rubber band "boing"
+			local down = TweenService:Create(pitch,
+				TweenInfo.new(SHOOT_SFX.SnapTime, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out),
+				{ Octave = SHOOT_SFX.PitchLow })
+			down.Completed:Once(function()
+				TweenService:Create(pitch, TweenInfo.new(SHOOT_SFX.Recover, Enum.EasingStyle.Sine),
+					{ Octave = SHOOT_SFX.PitchEnd }):Play()
+			end)
+			down:Play()
+			-- vibration dies out like a band settling
+			if trem then
+				TweenService:Create(trem, TweenInfo.new(SHOOT_SFX.SnapTime + SHOOT_SFX.Recover, Enum.EasingStyle.Quad),
+					{ Depth = 0 }):Play()
 			end
 		end
-		if shot then
-			local pitch = snd:FindFirstChildOfClass("PitchShiftSoundEffect")
-			local trem = snd:FindFirstChildOfClass("TremoloSoundEffect")
-			if not pitch then return end
-			local function twang()
-				snd.PlaybackSpeed = SHOOT_SFX.PlaybackSpeed
-				pitch.Octave = SHOOT_SFX.PitchStart
-				if trem then trem.Depth = SHOOT_SFX.TremoloDepth end
-				-- elastic snap-down = the rubber band "boing"
-				local down = TweenService:Create(pitch,
-					TweenInfo.new(SHOOT_SFX.SnapTime, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out),
-					{ Octave = SHOOT_SFX.PitchLow })
-				down.Completed:Once(function()
-					TweenService:Create(pitch, TweenInfo.new(SHOOT_SFX.Recover, Enum.EasingStyle.Sine),
-						{ Octave = SHOOT_SFX.PitchEnd }):Play()
-				end)
-				down:Play()
-				-- vibration dies out like a band settling
-				if trem then
-					TweenService:Create(trem, TweenInfo.new(SHOOT_SFX.SnapTime + SHOOT_SFX.Recover, Enum.EasingStyle.Quad),
-						{ Depth = 0 }):Play()
-				end
-			end
-			snd.Played:Connect(twang)
-			if snd.IsPlaying then twang() end
-		end
+		snd.Played:Connect(twang)
+		if snd.IsPlaying then twang() end
 	end)
 end
 
@@ -545,10 +676,10 @@ local function hookGunSounds(inst)
 		root.Unequipped:Connect(function() setBlur(0, SCOPE_BLUR.FadeOut) end)
 	end
 	for _, d in ipairs(root:GetDescendants()) do
-		if d:IsA("Sound") then styleSound(d) end
+		if d:IsA("Sound") and isShot(d) then styleSound(d) end
 	end
 	root.DescendantAdded:Connect(function(d)
-		if d:IsA("Sound") then styleSound(d) end
+		if d:IsA("Sound") and isShot(d) then styleSound(d) end
 	end)
 end
 
@@ -574,6 +705,13 @@ local function applyGlow(inst)
 			h.DepthMode = Enum.HighlightDepthMode.Occluded
 			h.Parent = part
 		end
+	end)
+end
+
+local function tileTexture(inst)
+	pcall(function()
+		inst.StudsPerTileU = TEXTURE_TILE.Studs
+		inst.StudsPerTileV = TEXTURE_TILE.Studs
 	end)
 end
 
@@ -604,6 +742,7 @@ local function handle(inst, p)
 	else
 		pcall(function() inst[p] = new end)
 		if iconIds[id] then shrinkIcon(inst) end
+		if TEXTURE_TILE.Enabled and inst:IsA("Texture") then tileTexture(inst) end
 	end
 end
 
@@ -611,6 +750,7 @@ local function apply(inst)
 	local props = PROPS[inst.ClassName]
 	if not props or seen[inst] then return end
 	seen[inst] = true
+	if TEXTURE_TILE.Enabled and TEXTURE_TILE.ALL_TEXTURES and inst:IsA("Texture") then tileTexture(inst) end
 	if inst:IsA("Sound") then
 		local sid = parseId(inst.SoundId)
 		if AFFECT_ALL_SOUNDS or (sid and SOUND_IDS[sid]) then styleSound(inst) end
